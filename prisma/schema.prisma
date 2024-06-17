@@ -1,25 +1,33 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-generator client {
-  provider = "prisma-client-js"
-}
-
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id             String    @id @default(uuid())
-  email          String    @unique
-  hashedPassword String
-  Account        Account[]
+generator client {
+  provider = "prisma-client-js"
 }
 
-model Account {
-  id      String @id @default(uuid())
-  userId  String
-  user    User   @relation(fields: [userId], references: [id])
-  balance Int    @default(0)
+model User {
+  id             Int      @id @default(autoincrement())
+  email          String   @unique
+  hashedPassword String
+  caughtPokemon  CaughtPokemon[]
 }
+
+model Pokemon {
+  id   Int      @id @default(autoincrement())
+  name String   @unique
+  caughtBy CaughtPokemon[]
+}
+
+model CaughtPokemon {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  pokemonId Int
+  user      User     @relation(fields: [userId], references: [id])
+  pokemon   Pokemon  @relation(fields: [pokemonId], references: [id])
+}
+

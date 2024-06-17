@@ -2,14 +2,12 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { PrismaClient, Prisma } from "@prisma/client";
 import { HTTPException } from "hono/http-exception";
-import { decode, sign, verify } from "hono/jwt";
-import { jwt } from 'hono/jwt'
-import type { JwtVariables } from 'hono/jwt'
+import { sign, verify } from "jsonwebtoken";
+import axios from "axios";
+import { jwt } from "hono/jwt";
+import bcrypt from "bcrypt";
 
-type Variables = JwtVariables
-
-const app = new Hono<{ Variables: Variables }>()
-
+const app = new Hono();
 const prisma = new PrismaClient();
 
 app.use("/*", cors());
@@ -17,101 +15,119 @@ app.use("/*", cors());
 app.use(
   "/protected/*",
   jwt({
-    secret: 'mySecretKey',
+    secret: "mySecretKey",
   })
 );
 
-app.get("/protected/account/balance", async (c) => {
-  const payload = c.get('jwtPayload')
-  if (!payload) {
-    throw new HTTPException(401, { message: "Unauthorized" });
-  }
-  const user = await prisma.user.findUnique({
-    where: { id: payload.sub },
-    select: { Account: { select: { balance: true, id: true } } },
-  });
-
-  return c.json({ data: user });
-});
-
-app.get("/:userId/account/balance", async (c) => {
-  // get user account balance from url params
-  const { userId } = c.req.param();
-
-  // create a new user
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { Account: { select: { balance: true, id: true } } },
-  });
-  return c.json({ data: user });
-});
-
+// Authentication Endpoints
 app.post("/register", async (c) => {
+  const { email, password } = await c.req.json();
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+
   try {
-    const body = await c.req.json();
-
-    const bcryptHash = await Bun.password.hash(body.password, {
-      algorithm: "bcrypt",
-      cost: 4, // number between 4-31
-    });
-
     const user = await prisma.user.create({
-      data: {
-        email: body.email,
-        hashedPassword: bcryptHash,
-        Account: {
-          create: {
-            balance: 0,
-          },
-        },
-      },
+      data: { email, hashedPassword },
     });
-
-    return c.json({ message: `${user.email} created successfully}` });
+    return c.json({ message: `${user.email} created successfully` });
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError) {
-      // The .code property can be accessed in a type-safe manner
       if (e.code === "P2002") {
-        console.log(
-          "There is a unique constraint violation, a new user cannot be created with this email"
-        );
         return c.json({ message: "Email already exists" });
       }
     }
+    throw new HTTPException(500, { message: "Internal Server Error" });
   }
 });
 
 app.post("/login", async (c) => {
-  try {
-    const body = await c.req.json();
-    const user = await prisma.user.findUnique({
-      where: { email: body.email },
-      select: { id: true, hashedPassword: true },
-    });
+  const { email, password } = await c.req.json();
 
-    if (!user) {
-      return c.json({ message: "User not found" });
-    }
+  const user = await prisma.user.findUnique({
+    where: { email },
+    select: { id: true, hashedPassword: true },
+  });
 
-    const match = await Bun.password.verify(
-      body.password,
-      user.hashedPassword,
-      "bcrypt"
+  if (!user) {
+    return c.json({ message: "User not found" }, 404);
+  }
+
+  const match = await bcrypt.compare(password, user.hashedPassword);
+
+  if (match) {
+    const token = sign(
+      { sub: user.id, exp: Math.floor(Date.now() / 1000) + 60 * 60 },
+      "mySecretKey"
     );
-    if (match) {
-      const payload = {
-        sub: user.id,
-        exp: Math.floor(Date.now() / 1000) + 60 * 60, // Token expires in 60 minutes
-      };
-      const secret = "mySecretKey";
-      const token = await sign(payload, secret);
-      return c.json({ message: "Login successful", token: token });
-    } else {
-      throw new HTTPException(401, { message: "Invalid credentials" });
-    }
-  } catch (error) {
+    return c.json({ message: "Login successful", token });
+  } else {
     throw new HTTPException(401, { message: "Invalid credentials" });
   }
+});
+
+// Fetch Pokemon Data from PokeAPI
+app.get("/pokemon/:name", async (c) => {
+  const { name } = c.req.param();
+
+  try {
+    const response = await axios.get(
+      `https://pokeapi.co/api/v2/pokemon/${name}`
+    );
+    return c.json({ data: response.data });
+  } catch (error) {
+    return c.json({ message: "Pokemon not found" }, 404);
+  }
+});
+
+// Protected User Resource Endpoints
+app.post("/protected/catch", async (c) => {
+  const payload = c.get("jwtPayload");
+  if (!payload) {
+    throw new HTTPException(401, { message: "Unauthorized" });
+  }
+
+  const { name } = await c.req.json();
+
+  let pokemon = await prisma.pokemon.findUnique({ where: { name } });
+
+  if (!pokemon) {
+    pokemon = await prisma.pokemon.create({ data: { name } });
+  }
+
+  const caughtPokemon = await prisma.caughtPokemon.create({
+    data: { userId: payload.sub, pokemonId: pokemon.id },
+  });
+
+  return c.json({ message: "Pokemon caught", data: caughtPokemon });
+});
+
+app.delete("/protected/release/:id", async (c) => {
+  const payload = c.get("jwtPayload");
+  if (!payload) {
+    throw new HTTPException(401, { message: "Unauthorized" });
+  }
+
+  const { id } = c.req.param();
+
+  await prisma.caughtPokemon.deleteMany({
+    where: { id: Number(id), userId: payload.sub },
+  });
+
+  return c.json({ message: "Pokemon released" });
+});
+
+app.get("/protected/caught", async (c) => {
+  const payload = c.get("jwtPayload");
+  if (!payload) {
+    throw new HTTPException(401, { message: "Unauthorized" });
+  }
+
+  const caughtPokemon = await prisma.caughtPokemon.findMany({
+    where: { userId: payload.sub },
+    include: { pokemon: true },
+  });
+
+  return c.json({ data: caughtPokemon });
 });
 
 export default app;
